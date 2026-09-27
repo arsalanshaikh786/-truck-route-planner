@@ -97,7 +97,6 @@
     </fieldset>
 
     <button class="btn btn-main" id="getRouteBtn">Get Truck Route</button>
-    <button class="btn btn-add" id="demoAlertBtn" style="border-color:var(--danger);color:#f87171;">🎬 Demo: Restricted Alert Dikhao</button>
     <button class="btn btn-main" id="startNavBtn" style="background:var(--accent2);color:#111;" disabled>🧭 Start Navigation</button>
     <button class="btn btn-clear" id="stopNavBtn" style="display:none;border-color:var(--danger);color:#f87171;">⏹ Stop Navigation</button>
     <button class="btn btn-clear" id="clearBtn">Clear All</button>
@@ -300,52 +299,12 @@
       try{ map.removeLayer('route-line'); map.removeSource('route-src'); }catch(e){}
       routeLayerAdded = false;
     }
-    try{ map.removeLayer('demo-route-line'); map.removeSource('demo-route-src'); }catch(e){}
   });
 
   function parseLatLng(str){
     var parts = str.split(',').map(function(s){ return parseFloat(s.trim()); });
     if(parts.length !== 2 || isNaN(parts[0]) || isNaN(parts[1])) return null;
     return parts; // [lat, lng]
-  }
-
-  document.getElementById('demoAlertBtn').addEventListener('click', showDemoRestrictedAlert);
-
-  function showDemoRestrictedAlert(){
-    var div = document.getElementById('result');
-    var banner = document.createElement('div');
-    banner.style.cssText = 'background:rgba(239,68,68,.15);border:1px solid var(--danger);border-radius:8px;padding:10px;margin-bottom:8px;';
-    banner.innerHTML = '<b style="color:#f87171;">🚫 Ye road truck ke liye restricted hai</b>'
-      + '<div style="font-size:11px;color:var(--muted);margin-top:4px;">Route mein wo hissa map par LAL (red) rang mein dikhaya gaya hai. Chota/prohibited road hoga to red, normal-fit road GREEN.</div>';
-    div.prepend(banner);
-    setStatus('Demo alert dikhaya gaya (presentation ke liye).');
-
-    // Force the current route line red if one exists on the map
-    if(routeLayerAdded){
-      try{ map.setPaintProperty('route-line', 'line-color', '#ef4444'); }catch(e){}
-      lastRestricted = true;
-      return;
-    }
-
-    // No route yet - draw a small sample red line near the current map center so the visual still works
-    try{
-      var c = map.getCenter();
-      var demoLine = {
-        type: 'LineString',
-        coordinates: [
-          [c.lng - 0.01, c.lat - 0.006],
-          [c.lng, c.lat],
-          [c.lng + 0.01, c.lat + 0.006]
-        ]
-      };
-      if(map.getSource('demo-route-src')){
-        map.getSource('demo-route-src').setData({type:'Feature', geometry: demoLine});
-      } else {
-        map.addSource('demo-route-src', { type:'geojson', data: {type:'Feature', geometry: demoLine} });
-        map.addLayer({ id:'demo-route-line', type:'line', source:'demo-route-src', paint:{ 'line-color':'#ef4444', 'line-width':5 } });
-      }
-      map.setZoom(Math.max(map.getZoom(), 13));
-    }catch(e){ /* best-effort visual only */ }
   }
 
   document.getElementById('getRouteBtn').addEventListener('click', function(){
@@ -423,9 +382,25 @@
     var restricted = route.restricted ? route.restricted > 0 : (route.has_time_restrictions || false);
     var ferry = route.ferry ? route.ferry > 0 : false;
 
+    // best-effort: pick up traffic-adjusted duration under whichever field name the API actually sent
+    var trafficSecs = route.duration_in_traffic || route.durationInTraffic || route.traffic_duration
+      || route.duration_traffic || (route.traffic && route.traffic.duration) || null;
+    var trafficMin = trafficSecs ? Math.round(trafficSecs/60) : null;
+    var extraMin = (trafficMin && durMin !== 'N/A') ? (trafficMin - durMin) : null;
+
+    var trafficRow = '';
+    if(trafficMin){
+      trafficRow = '<div>Traffic ke saath time: <b>' + trafficMin + ' min</b>'
+        + (extraMin > 0 ? ' <span style="color:#f87171">(+' + extraMin + ' min traffic ki wajah se)</span>' : ' <span style="color:#4ade80">(traffic clear)</span>')
+        + '</div>';
+    } else {
+      trafficRow = '<div style="font-size:11px;color:var(--muted)">Traffic-adjusted time is response mein nahi mila — "Show live traffic" checkbox se map par traffic dikh jaayega, lekin ETA mein add nahi ho paya.</div>';
+    }
+
     var html = '<div class="stat">'
       + '<div>Distance: <b>' + distKm + ' km</b></div>'
       + '<div>Est. Time: <b>' + durMin + ' min</b></div>'
+      + trafficRow
       + '<div>'
       + '<span class="flag ' + (toll ? 'on' : 'off') + '">' + (toll ? '⚠ Toll on route' : '✓ No toll') + '</span>'
       + '<span class="flag ' + (restricted ? 'on' : 'off') + '">' + (restricted ? '⚠ Restricted segment' : '✓ No restriction') + '</span>'
