@@ -97,6 +97,7 @@
     </fieldset>
 
     <button class="btn btn-main" id="getRouteBtn">Get Truck Route</button>
+    <button class="btn btn-add" id="demoAlertBtn" style="border-color:var(--danger);color:#f87171;">🎬 Demo: Restricted Alert Dikhao</button>
     <button class="btn btn-main" id="startNavBtn" style="background:var(--accent2);color:#111;" disabled>🧭 Start Navigation</button>
     <button class="btn btn-clear" id="stopNavBtn" style="display:none;border-color:var(--danger);color:#f87171;">⏹ Stop Navigation</button>
     <button class="btn btn-clear" id="clearBtn">Clear All</button>
@@ -299,12 +300,52 @@
       try{ map.removeLayer('route-line'); map.removeSource('route-src'); }catch(e){}
       routeLayerAdded = false;
     }
+    try{ map.removeLayer('demo-route-line'); map.removeSource('demo-route-src'); }catch(e){}
   });
 
   function parseLatLng(str){
     var parts = str.split(',').map(function(s){ return parseFloat(s.trim()); });
     if(parts.length !== 2 || isNaN(parts[0]) || isNaN(parts[1])) return null;
     return parts; // [lat, lng]
+  }
+
+  document.getElementById('demoAlertBtn').addEventListener('click', showDemoRestrictedAlert);
+
+  function showDemoRestrictedAlert(){
+    var div = document.getElementById('result');
+    var banner = document.createElement('div');
+    banner.style.cssText = 'background:rgba(239,68,68,.15);border:1px solid var(--danger);border-radius:8px;padding:10px;margin-bottom:8px;';
+    banner.innerHTML = '<b style="color:#f87171;">🚫 Ye road truck ke liye restricted hai</b>'
+      + '<div style="font-size:11px;color:var(--muted);margin-top:4px;">Route mein wo hissa map par LAL (red) rang mein dikhaya gaya hai. Chota/prohibited road hoga to red, normal-fit road GREEN.</div>';
+    div.prepend(banner);
+    setStatus('Demo alert dikhaya gaya (presentation ke liye).');
+
+    // Force the current route line red if one exists on the map
+    if(routeLayerAdded){
+      try{ map.setPaintProperty('route-line', 'line-color', '#ef4444'); }catch(e){}
+      lastRestricted = true;
+      return;
+    }
+
+    // No route yet - draw a small sample red line near the current map center so the visual still works
+    try{
+      var c = map.getCenter();
+      var demoLine = {
+        type: 'LineString',
+        coordinates: [
+          [c.lng - 0.01, c.lat - 0.006],
+          [c.lng, c.lat],
+          [c.lng + 0.01, c.lat + 0.006]
+        ]
+      };
+      if(map.getSource('demo-route-src')){
+        map.getSource('demo-route-src').setData({type:'Feature', geometry: demoLine});
+      } else {
+        map.addSource('demo-route-src', { type:'geojson', data: {type:'Feature', geometry: demoLine} });
+        map.addLayer({ id:'demo-route-line', type:'line', source:'demo-route-src', paint:{ 'line-color':'#ef4444', 'line-width':5 } });
+      }
+      map.setZoom(Math.max(map.getZoom(), 13));
+    }catch(e){ /* best-effort visual only */ }
   }
 
   document.getElementById('getRouteBtn').addEventListener('click', function(){
@@ -390,11 +431,28 @@
       + '<span class="flag ' + (restricted ? 'on' : 'off') + '">' + (restricted ? '⚠ Restricted segment' : '✓ No restriction') + '</span>'
       + (ferry ? '<span class="flag on">⚠ Ferry involved</span>' : '')
       + '</div></div>';
+
+    if(restricted){
+      html += '<div style="background:rgba(239,68,68,.15);border:1px solid var(--danger);border-radius:8px;padding:10px;margin-bottom:8px;">'
+        + '<b style="color:#f87171;">🚫 Ye road truck ke liye restricted hai</b>'
+        + '<div style="font-size:11px;color:var(--muted);margin-top:4px;">Route mein wo hissa map par LAL (red) rang mein dikhaya gaya hai. Chota/prohibited road hoga to red, normal-fit road GREEN.</div>'
+        + '</div>';
+    }
     div.innerHTML = html;
     renderRaw(data);
 
     lastRestricted = restricted;
     routeSteps = extractSteps(route);
+
+    // best-effort: mark individual restricted points red if the API flagged any step/intersection as restricted
+    var restrictedPoints = [];
+    (route.legs || []).forEach(function(leg){
+      (leg.steps || []).forEach(function(s){
+        var flagged = s.restricted || s.restriction || (s.intersections || []).some(function(i){ return i.restricted; });
+        if(flagged && s.maneuver && s.maneuver.location) restrictedPoints.push(s.maneuver.location);
+      });
+    });
+
     try{
       var geometry = route.geometry;
       if(geometry && geometry.coordinates){
@@ -412,6 +470,12 @@
           });
           routeLayerAdded = true;
         }
+        restrictedPoints.forEach(function(loc){
+          try{
+            var rm = new mappls.Marker({ map: map, position: {lat: loc[1], lng: loc[0]}, fillColor: '#ef4444' });
+            clickMarkers.push(rm);
+          }catch(e){}
+        });
         var coords = geometry.coordinates;
         if(coords.length){
           var bounds = coords.reduce(function(b,c){
