@@ -50,9 +50,35 @@
   .suggest-item:last-child{border-bottom:none;}
   .suggest-item:hover{background:var(--panel);}
   .suggest-item small{display:block;color:var(--muted);font-size:10px;margin-top:2px;}
+  .saved-item{background:var(--panel2);border-radius:6px;padding:8px;margin-bottom:6px;font-size:12px;display:flex;justify-content:space-between;align-items:center;gap:6px;}
+  .saved-item .name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;}
+  .saved-item button{background:var(--danger);border:none;color:#fff;border-radius:5px;padding:4px 7px;cursor:pointer;font-size:10px;}
+  .icon-btn{background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:8px;font-size:12px;cursor:pointer;flex:1;}
+  .btn-row{display:flex;gap:6px;margin-top:6px;}
+  #hamburger{display:none;position:fixed;top:10px;left:10px;z-index:200;background:var(--panel);color:var(--accent);border:1px solid var(--border);border-radius:8px;width:38px;height:38px;font-size:18px;cursor:pointer;}
+  @media (max-width:768px){
+    #app{flex-direction:column;}
+    #hamburger{display:block;}
+    #sidebar{
+      position:fixed;top:0;left:0;bottom:0;width:88%;max-width:340px;z-index:150;
+      transform:translateX(-105%);transition:transform .25s ease;padding-top:56px;
+    }
+    #sidebar.open{transform:translateX(0);}
+    #map{width:100%;height:100vh;}
+    .sidebar-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:140;}
+    .sidebar-overlay.open{display:block;}
+    #navBanner{min-width:220px;max-width:90%;font-size:13px;}
+  }
+  @media print{
+    #sidebar, #hamburger, #map{display:none !important;}
+    #printArea{display:block !important;}
+  }
 </style>
 </head>
 <body>
+<button id="hamburger">☰</button>
+<div class="sidebar-overlay" id="sidebarOverlay"></div>
+<div id="printArea" style="display:none;"></div>
 <div id="app">
   <div id="sidebar">
     <h1>🚚 Truck Route Planner</h1>
@@ -76,6 +102,14 @@
     </fieldset>
 
     <fieldset>
+      <legend>Fuel Cost</legend>
+      <div class="row">
+        <div><label>Mileage (km/l)</label><input type="number" id="mileage" step="0.1" value="4"></div>
+        <div><label>Diesel price (₹/l)</label><input type="number" id="fuelPrice" step="0.1" value="92"></div>
+      </div>
+    </fieldset>
+
+    <fieldset>
       <legend>Route Points</legend>
       <div class="hint">Jagah ka naam type karo (jaise "Sangamner") aur list mein se select karo. Map par click karke bhi point add kar sakte ho, ya current location button use karo.</div>
 
@@ -94,6 +128,11 @@
         <input type="text" id="pt-dest" placeholder="Jagah ka naam ya lat,lng" autocomplete="off">
         <div class="suggest-box" id="suggest-dest"></div>
       </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Saved Routes</legend>
+      <div id="savedRoutesList" class="hint">Koi route save nahi hui abhi.</div>
     </fieldset>
 
     <button class="btn btn-main" id="getRouteBtn">Get Truck Route</button>
@@ -413,8 +452,38 @@
         + '<div style="font-size:11px;color:var(--muted);margin-top:4px;">Route mein wo hissa map par LAL (red) rang mein dikhaya gaya hai. Chota/prohibited road hoga to red, normal-fit road GREEN.</div>'
         + '</div>';
     }
+
+    // Fuel cost estimate
+    var mileage = parseFloat(document.getElementById('mileage').value) || 0;
+    var fuelPrice = parseFloat(document.getElementById('fuelPrice').value) || 0;
+    var distNum = route.distance ? route.distance/1000 : 0;
+    if(mileage > 0 && distNum > 0){
+      var litres = distNum / mileage;
+      var cost = litres * fuelPrice;
+      html += '<div class="stat">⛽ Fuel estimate: <b>' + litres.toFixed(1) + ' L</b> &nbsp;•&nbsp; Cost: <b>₹' + cost.toFixed(0) + '</b></div>';
+    }
+
+    html += '<div class="btn-row">'
+      + '<button class="icon-btn" id="saveRouteBtn">💾 Save Route</button>'
+      + '<button class="icon-btn" id="shareRouteBtn">📤 Share</button>'
+      + '<button class="icon-btn" id="printRouteBtn">🖨️ Print</button>'
+      + '</div>'
+      + '<button class="icon-btn" id="findRestStopsBtn" style="width:100%;margin-top:6px;">🍽️ Rest stops / fuel pumps dhundo</button>'
+      + '<div id="weatherBox" style="margin-top:8px;"></div>'
+      + '<div id="restStopsBox" style="margin-top:8px;"></div>';
     div.innerHTML = html;
     renderRaw(data);
+
+    lastRouteInfo = {
+      distKm: distKm, durMin: durMin, toll: toll, restricted: restricted,
+      source: document.getElementById('pt-source').value,
+      dest: document.getElementById('pt-dest').value
+    };
+    wireResultButtons();
+    if(route.geometry && route.geometry.coordinates && route.geometry.coordinates.length){
+      var destLoc = route.geometry.coordinates[route.geometry.coordinates.length - 1];
+      fetchWeather(destLoc[1], destLoc[0]);
+    }
 
     lastRestricted = restricted;
     routeSteps = extractSteps(route);
@@ -560,6 +629,146 @@
         setTimeout(stopNavigation, 3000);
       }
     }
+  }
+
+  // ==================== Weather ====================
+  function fetchWeather(lat, lng){
+    var box = document.getElementById('weatherBox');
+    if(!box) return;
+    box.innerHTML = '<div class="hint">Weather check ho raha hai...</div>';
+    fetch('https://api.open-meteo.com/v1/forecast?latitude=' + lat + '&longitude=' + lng + '&current_weather=true')
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if(!d.current_weather){ box.innerHTML = ''; return; }
+        var cw = d.current_weather;
+        var codeMap = {0:'Clear ☀️',1:'Mostly clear 🌤️',2:'Partly cloudy ⛅',3:'Cloudy ☁️',45:'Fog 🌫️',48:'Fog 🌫️',
+          51:'Light drizzle 🌦️',61:'Rain 🌧️',63:'Rain 🌧️',65:'Heavy rain 🌧️',71:'Snow ❄️',80:'Rain showers 🌦️',95:'Thunderstorm ⛈️'};
+        var desc = codeMap[cw.weathercode] || 'Weather code ' + cw.weathercode;
+        var warn = (cw.weathercode >= 45 && cw.weathercode !== 3) ? '<div style="color:#f87171;font-size:11px;margin-top:2px;">⚠ Driving conditions mein savdhani rakho</div>' : '';
+        box.innerHTML = '<div class="stat">🌦️ Destination weather: <b>' + desc + '</b>, ' + cw.temperature + '°C, wind ' + cw.windspeed + ' km/h' + warn + '</div>';
+      }).catch(function(){ box.innerHTML = ''; });
+  }
+
+  // ==================== Rest stops / fuel pumps ====================
+  function findRestStops(){
+    var box = document.getElementById('restStopsBox');
+    if(!box || !lastRouteGeometry) return;
+    box.innerHTML = '<div class="hint">Dhundh rahe hain...</div>';
+    var coords = lastRouteGeometry.coordinates;
+    var mid = coords[Math.floor(coords.length/2)]; // [lng, lat]
+    Promise.all(['dhaba', 'petrol pump'].map(function(kw){
+      return fetch('/api/search?q=' + encodeURIComponent(kw) + '&lat=' + mid[1] + '&lng=' + mid[0])
+        .then(function(r){ return r.json(); }).catch(function(){ return {}; });
+    })).then(function(results){
+      var items = [];
+      results.forEach(function(d){
+        (d.suggestedLocations || d.suggestions || []).slice(0,4).forEach(function(it){ items.push(it); });
+      });
+      if(!items.length){ box.innerHTML = '<div class="hint">Kuch nahi mila route ke aas-paas.</div>'; return; }
+      box.innerHTML = '<div style="font-size:12px;font-weight:600;margin-bottom:4px;">Route ke aas-paas:</div>'
+        + items.map(function(it){
+            var name = it.placeName || it.placeAddress || 'Jagah';
+            return '<div class="saved-item"><span class="name">📍 ' + name + '</span></div>';
+          }).join('');
+    }).catch(function(){ box.innerHTML = '<div class="hint">Search fail hui.</div>'; });
+  }
+
+  // ==================== Save / Share / Print ====================
+  var lastRouteInfo = null;
+
+  function wireResultButtons(){
+    var saveBtn = document.getElementById('saveRouteBtn');
+    var shareBtn = document.getElementById('shareRouteBtn');
+    var printBtn = document.getElementById('printRouteBtn');
+    var restBtn = document.getElementById('findRestStopsBtn');
+    if(saveBtn) saveBtn.addEventListener('click', saveCurrentRoute);
+    if(shareBtn) shareBtn.addEventListener('click', shareCurrentRoute);
+    if(printBtn) printBtn.addEventListener('click', printCurrentRoute);
+    if(restBtn) restBtn.addEventListener('click', findRestStops);
+  }
+
+  function routeSummaryText(){
+    if(!lastRouteInfo) return '';
+    return 'Truck Route\n'
+      + 'From: ' + lastRouteInfo.source + '\n'
+      + 'To: ' + lastRouteInfo.dest + '\n'
+      + 'Distance: ' + lastRouteInfo.distKm + ' km\n'
+      + 'Est. Time: ' + lastRouteInfo.durMin + ' min\n'
+      + (lastRouteInfo.toll ? 'Toll: Yes\n' : 'Toll: No\n')
+      + (lastRouteInfo.restricted ? 'Warning: Route has a truck-restricted section\n' : '');
+  }
+
+  function saveCurrentRoute(){
+    if(!lastRouteInfo) return;
+    var name = prompt('Is route ka naam do (jaise "Pune -> Mumbai Daily"):', lastRouteInfo.source + ' → ' + lastRouteInfo.dest);
+    if(!name) return;
+    var list = getSavedRoutes();
+    list.unshift({ name: name, source: lastRouteInfo.source, dest: lastRouteInfo.dest, savedAt: Date.now() });
+    if(list.length > 15) list = list.slice(0, 15);
+    localStorage.setItem('truckSavedRoutes', JSON.stringify(list));
+    renderSavedRoutes();
+    setStatus('Route save ho gaya.');
+  }
+
+  function getSavedRoutes(){
+    try{ return JSON.parse(localStorage.getItem('truckSavedRoutes') || '[]'); }catch(e){ return []; }
+  }
+
+  function renderSavedRoutes(){
+    var box = document.getElementById('savedRoutesList');
+    var list = getSavedRoutes();
+    if(!list.length){ box.innerHTML = 'Koi route save nahi hui abhi.'; return; }
+    box.innerHTML = '';
+    list.forEach(function(r, i){
+      var row = document.createElement('div');
+      row.className = 'saved-item';
+      row.innerHTML = '<span class="name">' + r.name + '</span><button data-i="' + i + '">✕</button>';
+      row.querySelector('.name').addEventListener('click', function(){
+        document.getElementById('pt-source').value = r.source;
+        document.getElementById('pt-dest').value = r.dest;
+        setStatus('"' + r.name + '" load ho gaya — ab "Get Truck Route" dabao.');
+        closeSidebarOnMobile();
+      });
+      row.querySelector('button').addEventListener('click', function(ev){
+        ev.stopPropagation();
+        var l = getSavedRoutes();
+        l.splice(i, 1);
+        localStorage.setItem('truckSavedRoutes', JSON.stringify(l));
+        renderSavedRoutes();
+      });
+      box.appendChild(row);
+    });
+  }
+  renderSavedRoutes();
+
+  function shareCurrentRoute(){
+    var text = routeSummaryText();
+    if(!text) return;
+    var url = 'https://wa.me/?text=' + encodeURIComponent(text);
+    window.open(url, '_blank');
+  }
+
+  function printCurrentRoute(){
+    var text = routeSummaryText();
+    if(!text) return;
+    var area = document.getElementById('printArea');
+    area.innerHTML = '<pre style="font-family:Arial;font-size:16px;white-space:pre-wrap;color:#000;">' + text + '</pre>';
+    window.print();
+  }
+
+  // ==================== Mobile sidebar toggle ====================
+  var sidebarEl = document.getElementById('sidebar');
+  var overlayEl = document.getElementById('sidebarOverlay');
+  document.getElementById('hamburger').addEventListener('click', function(){
+    sidebarEl.classList.toggle('open');
+    overlayEl.classList.toggle('open');
+  });
+  overlayEl.addEventListener('click', function(){
+    sidebarEl.classList.remove('open');
+    overlayEl.classList.remove('open');
+  });
+  function closeSidebarOnMobile(){
+    if(window.innerWidth <= 768){ sidebarEl.classList.remove('open'); overlayEl.classList.remove('open'); }
   }
 </script>
 </body>
