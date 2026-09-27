@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Truck Route Planner - Mappls</title>
+<style>
+  :root{
+    --bg:#0f1420; --panel:#161d2e; --panel2:#1d2740; --accent:#ff7a00; --accent2:#22c55e;
+    --text:#e8ecf4; --muted:#8d97ad; --danger:#ef4444; --border:#2a3348;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:'Segoe UI',Arial,sans-serif;background:var(--bg);color:var(--text);}
+  #app{display:flex;height:100vh;}
+  #sidebar{width:380px;min-width:340px;background:var(--panel);padding:16px;overflow-y:auto;border-right:1px solid var(--border);}
+  #map{flex:1;position:relative;}
+  h1{font-size:18px;margin:0 0 4px;}
+  .sub{color:var(--muted);font-size:12px;margin-bottom:16px;}
+  fieldset{border:1px solid var(--border);border-radius:8px;margin-bottom:14px;padding:10px 12px;}
+  legend{color:var(--accent);font-size:12px;font-weight:600;padding:0 6px;}
+  label{display:block;font-size:12px;color:var(--muted);margin:8px 0 3px;}
+  input[type=text], input[type=number]{
+    width:100%;padding:7px 8px;border-radius:6px;border:1px solid var(--border);
+    background:var(--panel2);color:var(--text);font-size:13px;
+  }
+  .row{display:flex;gap:8px;}
+  .row > div{flex:1;}
+  .stop-item{display:flex;gap:6px;align-items:center;margin-bottom:6px;}
+  .stop-item input{flex:1;}
+  .stop-item button{background:var(--danger);border:none;color:#fff;border-radius:5px;padding:6px 8px;cursor:pointer;font-size:11px;}
+  .btn{width:100%;padding:10px;border:none;border-radius:7px;font-weight:600;cursor:pointer;font-size:13px;margin-top:6px;}
+  .btn-add{background:var(--panel2);color:var(--accent);border:1px dashed var(--accent);}
+  .btn-main{background:var(--accent);color:#111;}
+  .btn-main:disabled{opacity:.5;cursor:not-allowed;}
+  .btn-clear{background:transparent;color:var(--muted);border:1px solid var(--border);}
+  .chk{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text);margin:6px 0;}
+  #status{font-size:12px;color:var(--muted);margin-top:8px;min-height:16px;}
+  #result{margin-top:14px;}
+  .stat{background:var(--panel2);border-radius:8px;padding:10px;margin-bottom:8px;}
+  .stat b{font-size:16px;}
+  .flag{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;margin-right:6px;margin-top:4px;}
+  .flag.on{background:rgba(239,68,68,.2);color:#f87171;}
+  .flag.off{background:rgba(34,197,94,.2);color:#4ade80;}
+  .hint{font-size:11px;color:var(--muted);margin-top:6px;line-height:1.4;}
+  details{margin-top:10px;font-size:11px;color:var(--muted);}
+  summary{cursor:pointer;color:var(--accent);}
+  pre{white-space:pre-wrap;word-break:break-all;background:var(--panel2);padding:8px;border-radius:6px;max-height:200px;overflow:auto;}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="sidebar">
+    <h1>🚚 Truck Route Planner</h1>
+    <div class="sub">Powered by Mappls — truck size ke hisaab se legal/safe route</div>
+
+    <fieldset>
+      <legend>Truck Details</legend>
+      <div class="row">
+        <div><label>Height (m)</label><input type="number" id="height" step="0.1" value="3.5"></div>
+        <div><label>Width (m)</label><input type="number" id="width" step="0.1" value="2.5"></div>
+      </div>
+      <div class="row">
+        <div><label>Length (m)</label><input type="number" id="length" step="0.1" value="10"></div>
+        <div><label>Weight (tons)</label><input type="number" id="weight" step="0.1" value="16"></div>
+      </div>
+      <label>Axle Load (tons)</label>
+      <input type="number" id="axle_load" step="0.1" value="9">
+      <div class="chk"><input type="checkbox" id="hazmat"> <label style="margin:0" for="hazmat">Carrying hazardous material</label></div>
+      <div class="chk"><input type="checkbox" id="avoidToll"> <label style="margin:0" for="avoidToll">Avoid toll roads</label></div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Route Points</legend>
+      <div class="hint">Map par click karo point add karne ke liye — pehla click = Source, aakhri = Destination, beech ke sab Stops ban jaayenge. Ya neeche direct "lat,lng" type karo.</div>
+      <label>Source (lat,lng)</label>
+      <input type="text" id="pt-source" placeholder="28.6139,77.2090">
+      <div id="stops-container"></div>
+      <button class="btn btn-add" id="addStopBtn">+ Add Stop</button>
+      <label style="margin-top:10px">Destination (lat,lng)</label>
+      <input type="text" id="pt-dest" placeholder="19.0760,72.8777">
+    </fieldset>
+
+    <button class="btn btn-main" id="getRouteBtn">Get Truck Route</button>
+    <button class="btn btn-clear" id="clearBtn">Clear All</button>
+    <div id="status"></div>
+
+    <div id="result"></div>
+  </div>
+  <div id="map"></div>
+</div>
+
+<script>
+  var map, clickMarkers = [], routeLayerAdded = false;
+
+  function setStatus(msg, isError){
+    var el = document.getElementById('status');
+    el.textContent = msg || '';
+    el.style.color = isError ? '#f87171' : '#8d97ad';
+  }
+
+  // ---- Get map key from our own backend, then load Mappls Map SDK ----
+  fetch('/api/map-key').then(function(r){ return r.json(); }).then(function(d){
+    var s = document.createElement('script');
+    s.src = "https://apis.mappls.com/advancedmaps/api/" + d.key + "/map_sdk?layer=vector&v=3.0&callback=onMapSdkReady";
+    s.async = true;
+    window.onMapSdkReady = initMap;
+    document.head.appendChild(s);
+  }).catch(function(err){
+    setStatus('Backend se map key nahi mili. Server chal raha hai? (' + err.message + ')', true);
+  });
+
+  function initMap(){
+    try{
+      map = new mappls.Map('map', { center: [22.9734, 78.6569], zoom: 4.5 });
+      map.on('load', function(){
+        map.on('click', function(e){
+          handleMapClick(e.lngLat.lat, e.lngLat.lng);
+        });
+      });
+    }catch(err){
+      setStatus('Map load fail hua: ' + err.message, true);
+    }
+  }
+
+  function handleMapClick(lat, lng){
+    var val = lat.toFixed(6) + ',' + lng.toFixed(6);
+    var srcInput = document.getElementById('pt-source');
+    var destInput = document.getElementById('pt-dest');
+    if(!srcInput.value){
+      srcInput.value = val;
+    } else if(!destInput.value){
+      destInput.value = val;
+    } else {
+      addStopRow(val);
+    }
+    dropPin(lat, lng);
+  }
+
+  function dropPin(lat, lng){
+    try{
+      var m = new mappls.Marker({ map: map, position: {lat:lat, lng:lng} });
+      clickMarkers.push(m);
+    }catch(e){ /* best-effort visual marker */ }
+  }
+
+  function addStopRow(prefill){
+    var container = document.getElementById('stops-container');
+    var row = document.createElement('div');
+    row.className = 'stop-item';
+    row.innerHTML = '<input type="text" class="stop-input" placeholder="lat,lng">'
+      + '<button type="button" onclick="this.parentElement.remove()">✕</button>';
+    if(prefill) row.querySelector('input').value = prefill;
+    container.appendChild(row);
+  }
+  document.getElementById('addStopBtn').addEventListener('click', function(){ addStopRow(); });
+  document.getElementById('clearBtn').addEventListener('click', function(){
+    document.getElementById('pt-source').value='';
+    document.getElementById('pt-dest').value='';
+    document.getElementById('stops-container').innerHTML='';
+    document.getElementById('result').innerHTML='';
+    setStatus('');
+    clickMarkers.forEach(function(m){ try{ m.remove(); }catch(e){} });
+    clickMarkers = [];
+    if(routeLayerAdded){
+      try{ map.removeLayer('route-line'); map.removeSource('route-src'); }catch(e){}
+      routeLayerAdded = false;
+    }
+  });
+
+  function parseLatLng(str){
+    var parts = str.split(',').map(function(s){ return parseFloat(s.trim()); });
+    if(parts.length !== 2 || isNaN(parts[0]) || isNaN(parts[1])) return null;
+    return parts; // [lat, lng]
+  }
+
+  document.getElementById('getRouteBtn').addEventListener('click', function(){
+    var srcRaw = document.getElementById('pt-source').value.trim();
+    var destRaw = document.getElementById('pt-dest').value.trim();
+    var src = parseLatLng(srcRaw);
+    var dest = parseLatLng(destRaw);
+    if(!src || !dest){
+      setStatus('Source aur Destination dono "lat,lng" format mein sahi bharo.', true);
+      return;
+    }
+    var stopInputs = document.querySelectorAll('.stop-input');
+    var stops = [];
+    stopInputs.forEach(function(inp){
+      var v = parseLatLng(inp.value.trim());
+      if(v) stops.push(v);
+    });
+
+    var coordsArr = [src].concat(stops).concat([dest]);
+    var coordsStr = coordsArr.map(function(p){ return p[1] + ',' + p[0]; }).join(';');
+
+    var btn = document.getElementById('getRouteBtn');
+    btn.disabled = true;
+    setStatus('Route nikala ja raha hai...');
+    document.getElementById('result').innerHTML = '';
+
+    var qs = new URLSearchParams({
+      coords: coordsStr,
+      height: document.getElementById('height').value,
+      width: document.getElementById('width').value,
+      length: document.getElementById('length').value,
+      weight: document.getElementById('weight').value,
+      axle_load: document.getElementById('axle_load').value,
+      hazmat: document.getElementById('hazmat').checked ? 'true' : 'false',
+      avoidToll: document.getElementById('avoidToll').checked ? 'true' : 'false'
+    });
+
+    fetch('/api/route?' + qs.toString())
+      .then(function(r){ return r.json().then(function(data){ return {ok:r.ok, status:r.status, data:data}; }); })
+      .then(function(res){
+        btn.disabled = false;
+        if(!res.ok){
+          setStatus('API error (' + res.status + '). Neeche raw response dekho.', true);
+          renderRaw(res.data);
+          return;
+        }
+        setStatus('Route mil gaya.');
+        renderResult(res.data);
+      })
+      .catch(function(err){
+        btn.disabled = false;
+        setStatus('Error: ' + err.message, true);
+      });
+  });
+
+  function renderRaw(data){
+    var div = document.getElementById('result');
+    var d = document.createElement('details');
+    d.innerHTML = '<summary>Raw API response</summary><pre>' + JSON.stringify(data, null, 2) + '</pre>';
+    div.appendChild(d);
+  }
+
+  function renderResult(data){
+    var div = document.getElementById('result');
+    div.innerHTML = '';
+    var route = data && data.routes && data.routes[0];
+    if(!route){
+      div.innerHTML = '<div class="stat">Route nahi mila. Points ya truck details check karo.</div>';
+      renderRaw(data);
+      return;
+    }
+    var distKm = route.distance ? (route.distance/1000).toFixed(1) : 'N/A';
+    var durMin = route.duration ? Math.round(route.duration/60) : 'N/A';
+    var toll = route.toll ? route.toll > 0 : (route.has_toll || false);
+    var restricted = route.restricted ? route.restricted > 0 : (route.has_time_restrictions || false);
+    var ferry = route.ferry ? route.ferry > 0 : false;
+
+    var html = '<div class="stat">'
+      + '<div>Distance: <b>' + distKm + ' km</b></div>'
+      + '<div>Est. Time: <b>' + durMin + ' min</b></div>'
+      + '<div>'
+      + '<span class="flag ' + (toll ? 'on' : 'off') + '">' + (toll ? '⚠ Toll on route' : '✓ No toll') + '</span>'
+      + '<span class="flag ' + (restricted ? 'on' : 'off') + '">' + (restricted ? '⚠ Restricted segment' : '✓ No restriction') + '</span>'
+      + (ferry ? '<span class="flag on">⚠ Ferry involved</span>' : '')
+      + '</div></div>';
+    div.innerHTML = html;
+    renderRaw(data);
+
+    try{
+      var geometry = route.geometry;
+      if(geometry && geometry.coordinates){
+        if(routeLayerAdded){
+          map.getSource('route-src').setData({type:'Feature', geometry: geometry});
+        } else {
+          map.addSource('route-src', { type:'geojson', data: {type:'Feature', geometry: geometry} });
+          map.addLayer({
+            id:'route-line', type:'line', source:'route-src',
+            paint: { 'line-color': restricted ? '#ef4444' : '#22c55e', 'line-width': 5 }
+          });
+          routeLayerAdded = true;
+        }
+        var coords = geometry.coordinates;
+        if(coords.length){
+          var bounds = coords.reduce(function(b,c){
+            return [[Math.min(b[0][0],c[0]), Math.min(b[0][1],c[1])], [Math.max(b[1][0],c[0]), Math.max(b[1][1],c[1])]];
+          }, [[coords[0][0],coords[0][1]],[coords[0][0],coords[0][1]]]);
+          try{ map.fitBounds(bounds, {padding:40}); }catch(e){}
+        }
+      }
+    }catch(e){ /* stats above still show even if drawing fails */ }
+  }
+</script>
+</body>
+</html>
