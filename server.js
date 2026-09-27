@@ -79,6 +79,8 @@ app.get("/api/route", async (req, res) => {
       overview: "full",
       geometries: "geojson",
       region: "ind",
+      traffic: "true",
+      departure_time: "now",
       height: height || "3.5",
       width: width || "2.5",
       length: length || "10",
