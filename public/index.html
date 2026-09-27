@@ -97,16 +97,26 @@
     </fieldset>
 
     <button class="btn btn-main" id="getRouteBtn">Get Truck Route</button>
+    <button class="btn btn-main" id="startNavBtn" style="background:var(--accent2);color:#111;" disabled>🧭 Start Navigation</button>
+    <button class="btn btn-clear" id="stopNavBtn" style="display:none;border-color:var(--danger);color:#f87171;">⏹ Stop Navigation</button>
     <button class="btn btn-clear" id="clearBtn">Clear All</button>
     <div id="status"></div>
 
     <div id="result"></div>
   </div>
-  <div id="map"></div>
+  <div id="map">
+    <div id="navBanner" style="display:none;position:absolute;top:12px;left:50%;transform:translateX(-50%);background:#111827;color:#fff;padding:10px 18px;border-radius:10px;font-size:14px;box-shadow:0 4px 14px rgba(0,0,0,.4);z-index:100;text-align:center;min-width:260px;">
+      <div id="navInstruction" style="font-weight:600;"></div>
+      <div id="navDistance" style="font-size:12px;color:#9ca3af;margin-top:2px;"></div>
+    </div>
+  </div>
 </div>
 
 <script>
   var map, clickMarkers = [], routeLayerAdded = false;
+  var allPoints = [];          // {lat,lng} of every source/stop/dest/click pin, survives traffic re-init
+  var lastRouteGeometry = null, lastRestricted = false;
+  var currentCenter = [22.9734, 78.6569], currentZoom = 4.5;
 
   function setStatus(msg, isError){
     var el = document.getElementById('status');
@@ -126,12 +136,29 @@
   });
 
   function initMap(){
+    buildMap(false);
+  }
+
+  function buildMap(trafficOn){
     try{
-      map = new mappls.Map('map', { center: [22.9734, 78.6569], zoom: 4.5, traffic: false });
+      map = new mappls.Map('map', { center: currentCenter, zoom: currentZoom, traffic: !!trafficOn });
       map.on('load', function(){
         map.on('click', function(e){
           handleMapClick(e.lngLat.lat, e.lngLat.lng);
         });
+        map.on('moveend', function(){
+          try{ var c = map.getCenter(); currentCenter = [c.lng, c.lat]; currentZoom = map.getZoom(); }catch(e){}
+        });
+        // redraw anything we had before this rebuild (e.g. after toggling traffic)
+        allPoints.forEach(function(p){ dropPin(p.lat, p.lng, true); });
+        if(lastRouteGeometry){
+          map.addSource('route-src', { type:'geojson', data: {type:'Feature', geometry: lastRouteGeometry} });
+          map.addLayer({
+            id:'route-line', type:'line', source:'route-src',
+            paint: { 'line-color': lastRestricted ? '#ef4444' : '#22c55e', 'line-width': 5 }
+          });
+          routeLayerAdded = true;
+        }
       });
     }catch(err){
       setStatus('Map load fail hua: ' + err.message, true);
@@ -211,14 +238,10 @@
     });
   });
 
-  // ---- Traffic toggle ----
+  // ---- Traffic toggle (rebuild map with traffic option - most reliable way this SDK supports it) ----
   document.getElementById('showTraffic').addEventListener('change', function(e){
-    try{
-      if(e.target.checked){ map.addTraffic ? map.addTraffic() : (map.traffic = true); }
-      else { map.removeTraffic ? map.removeTraffic() : (map.traffic = false); }
-    }catch(err){
-      setStatus('Traffic layer is map style mein available nahi lag rahi.', true);
-    }
+    setStatus(e.target.checked ? 'Traffic on ho raha hai...' : 'Traffic off ho raha hai...');
+    buildMap(e.target.checked);
   });
 
   function handleMapClick(lat, lng){
@@ -235,11 +258,12 @@
     dropPin(lat, lng);
   }
 
-  function dropPin(lat, lng){
+  function dropPin(lat, lng, isReplay){
     try{
       var m = new mappls.Marker({ map: map, position: {lat:lat, lng:lng} });
       clickMarkers.push(m);
     }catch(e){ /* best-effort visual marker */ }
+    if(!isReplay) allPoints.push({lat:lat, lng:lng});
   }
 
   var stopCounter = 0;
@@ -263,8 +287,14 @@
     document.getElementById('stops-container').innerHTML='';
     document.getElementById('result').innerHTML='';
     setStatus('');
+    stopNavigation();
     clickMarkers.forEach(function(m){ try{ m.remove(); }catch(e){} });
     clickMarkers = [];
+    allPoints = [];
+    lastRouteGeometry = null;
+    routeSteps = [];
+    destCoord = null;
+    document.getElementById('startNavBtn').disabled = true;
     if(routeLayerAdded){
       try{ map.removeLayer('route-line'); map.removeSource('route-src'); }catch(e){}
       routeLayerAdded = false;
@@ -363,9 +393,15 @@
     div.innerHTML = html;
     renderRaw(data);
 
+    lastRestricted = restricted;
+    routeSteps = extractSteps(route);
     try{
       var geometry = route.geometry;
       if(geometry && geometry.coordinates){
+        lastRouteGeometry = geometry;
+        destCoord = geometry.coordinates[geometry.coordinates.length - 1]; // [lng, lat]
+        document.getElementById('startNavBtn').disabled = false;
+
         if(routeLayerAdded){
           map.getSource('route-src').setData({type:'Feature', geometry: geometry});
         } else {
@@ -385,6 +421,106 @@
         }
       }
     }catch(e){ /* stats above still show even if drawing fails */ }
+  }
+
+  // ---- Turn-by-turn steps from the route response (best-effort, schema may vary) ----
+  function extractSteps(route){
+    var steps = [];
+    (route.legs || []).forEach(function(leg){
+      (leg.steps || []).forEach(function(s){
+        if(s.maneuver && s.maneuver.location){
+          steps.push({
+            instruction: (s.maneuver.instruction) || ('Continue' + (s.name ? (' on ' + s.name) : '')),
+            loc: s.maneuver.location // [lng, lat]
+          });
+        }
+      });
+    });
+    return steps;
+  }
+
+  function haversineKm(lat1, lon1, lat2, lon2){
+    var R = 6371, dLat = (lat2-lat1) * Math.PI/180, dLon = (lon2-lon1) * Math.PI/180;
+    var a = Math.sin(dLat/2)*Math.sin(dLat/2) + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)*Math.sin(dLon/2);
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  }
+
+  // ---- Live navigation (drive mode) ----
+  var navWatchId = null, navMarker = null, routeSteps = [], destCoord = null, passedStepCount = 0;
+
+  document.getElementById('startNavBtn').addEventListener('click', startNavigation);
+  document.getElementById('stopNavBtn').addEventListener('click', stopNavigation);
+
+  function startNavigation(){
+    if(!navigator.geolocation){
+      setStatus('Ye browser live location share nahi kar sakta.', true);
+      return;
+    }
+    if(!destCoord){
+      setStatus('Pehle route calculate karo.', true);
+      return;
+    }
+    passedStepCount = 0;
+    document.getElementById('startNavBtn').style.display = 'none';
+    document.getElementById('stopNavBtn').style.display = 'block';
+    document.getElementById('navBanner').style.display = 'block';
+    setStatus('Navigation shuru ho gaya — live location track ho rahi hai.');
+
+    navWatchId = navigator.geolocation.watchPosition(function(pos){
+      var lat = pos.coords.latitude, lng = pos.coords.longitude;
+      updateNavMarker(lat, lng);
+      try{ map.setCenter([lng, lat]); map.setZoom(16); }catch(e){}
+      updateNavBanner(lat, lng);
+    }, function(err){
+      setStatus('Live location error: ' + err.message, true);
+    }, { enableHighAccuracy: true, maximumAge: 2000, timeout: 15000 });
+  }
+
+  function stopNavigation(){
+    if(navWatchId !== null){ navigator.geolocation.clearWatch(navWatchId); navWatchId = null; }
+    document.getElementById('startNavBtn').style.display = 'block';
+    document.getElementById('stopNavBtn').style.display = 'none';
+    document.getElementById('navBanner').style.display = 'none';
+    if(navMarker){ try{ navMarker.remove(); }catch(e){} navMarker = null; }
+  }
+
+  function updateNavMarker(lat, lng){
+    try{
+      if(navMarker){ navMarker.setPosition({lat:lat, lng:lng}); }
+      else { navMarker = new mappls.Marker({ map: map, position: {lat:lat, lng:lng}, fitbounds:false }); }
+    }catch(e){ /* best-effort */ }
+  }
+
+  function updateNavBanner(lat, lng){
+    var instrEl = document.getElementById('navInstruction');
+    var distEl = document.getElementById('navDistance');
+
+    // find the next un-passed step (nearest ahead)
+    var nextStep = null, nextDist = Infinity;
+    for(var i = passedStepCount; i < routeSteps.length; i++){
+      var s = routeSteps[i];
+      var d = haversineKm(lat, lng, s.loc[1], s.loc[0]);
+      if(d < 0.05){ passedStepCount = i + 1; continue; } // within 50m, treat as passed
+      if(d < nextDist){ nextDist = d; nextStep = s; }
+      break; // steps are sequential, stop at first upcoming one
+    }
+
+    if(nextStep){
+      instrEl.textContent = '➡ ' + nextStep.instruction;
+      distEl.textContent = (nextDist*1000 < 950 ? Math.round(nextDist*1000) + ' m' : nextDist.toFixed(1) + ' km') + ' mein';
+    } else {
+      instrEl.textContent = 'Seedhe chalte raho';
+      distEl.textContent = '';
+    }
+
+    if(destCoord){
+      var remKm = haversineKm(lat, lng, destCoord[1], destCoord[0]);
+      distEl.textContent += (distEl.textContent ? '  •  ' : '') + 'Destination: ' + remKm.toFixed(1) + ' km baaki';
+      if(remKm < 0.05){
+        instrEl.textContent = '🏁 Aap destination pahunch gaye!';
+        setTimeout(stopNavigation, 3000);
+      }
+    }
   }
 </script>
 </body>
