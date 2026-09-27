@@ -45,6 +45,25 @@ app.get("/api/map-key", (req, res) => {
   res.json({ key: MAP_SDK_KEY });
 });
 
+// Frontend asks for place suggestions (search box autosuggest)
+app.get("/api/search", async (req, res) => {
+  try {
+    const { q, lat, lng } = req.query;
+    if (!q) return res.json({ suggestedLocations: [] });
+
+    const token = await getAccessToken();
+    const params = new URLSearchParams({ query: q, region: "ind" });
+    if (lat && lng) params.set("location", `${lat},${lng}`);
+
+    const url = `https://atlas.mappls.com/api/places/search/json?${params.toString()}`;
+    const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    const data = await r.json();
+    res.status(r.status).json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Frontend asks for a truck route; secret never leaves the server
 app.get("/api/route", async (req, res) => {
   try {
