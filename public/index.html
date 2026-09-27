@@ -45,6 +45,11 @@
   details{margin-top:10px;font-size:11px;color:var(--muted);}
   summary{cursor:pointer;color:var(--accent);}
   pre{white-space:pre-wrap;word-break:break-all;background:var(--panel2);padding:8px;border-radius:6px;max-height:200px;overflow:auto;}
+  .suggest-box{position:absolute;left:0;right:0;top:100%;background:var(--panel2);border:1px solid var(--border);border-radius:6px;max-height:180px;overflow-y:auto;z-index:50;display:none;}
+  .suggest-item{padding:7px 9px;font-size:12px;cursor:pointer;border-bottom:1px solid var(--border);}
+  .suggest-item:last-child{border-bottom:none;}
+  .suggest-item:hover{background:var(--panel);}
+  .suggest-item small{display:block;color:var(--muted);font-size:10px;margin-top:2px;}
 </style>
 </head>
 <body>
@@ -67,17 +72,28 @@
       <input type="number" id="axle_load" step="0.1" value="9">
       <div class="chk"><input type="checkbox" id="hazmat"> <label style="margin:0" for="hazmat">Carrying hazardous material</label></div>
       <div class="chk"><input type="checkbox" id="avoidToll"> <label style="margin:0" for="avoidToll">Avoid toll roads</label></div>
+      <div class="chk"><input type="checkbox" id="showTraffic"> <label style="margin:0" for="showTraffic">Show live traffic</label></div>
     </fieldset>
 
     <fieldset>
       <legend>Route Points</legend>
-      <div class="hint">Map par click karo point add karne ke liye — pehla click = Source, aakhri = Destination, beech ke sab Stops ban jaayenge. Ya neeche direct "lat,lng" type karo.</div>
-      <label>Source (lat,lng)</label>
-      <input type="text" id="pt-source" placeholder="28.6139,77.2090">
+      <div class="hint">Jagah ka naam type karo (jaise "Sangamner") aur list mein se select karo. Map par click karke bhi point add kar sakte ho, ya current location button use karo.</div>
+
+      <label>Source</label>
+      <div style="position:relative">
+        <input type="text" id="pt-source" placeholder="Jagah ka naam ya lat,lng" autocomplete="off">
+        <div class="suggest-box" id="suggest-source"></div>
+      </div>
+      <button class="btn btn-add" id="useMyLocBtn" style="margin-top:6px">📍 Use my current location</button>
+
       <div id="stops-container"></div>
       <button class="btn btn-add" id="addStopBtn">+ Add Stop</button>
-      <label style="margin-top:10px">Destination (lat,lng)</label>
-      <input type="text" id="pt-dest" placeholder="19.0760,72.8777">
+
+      <label style="margin-top:10px">Destination</label>
+      <div style="position:relative">
+        <input type="text" id="pt-dest" placeholder="Jagah ka naam ya lat,lng" autocomplete="off">
+        <div class="suggest-box" id="suggest-dest"></div>
+      </div>
     </fieldset>
 
     <button class="btn btn-main" id="getRouteBtn">Get Truck Route</button>
@@ -111,7 +127,7 @@
 
   function initMap(){
     try{
-      map = new mappls.Map('map', { center: [22.9734, 78.6569], zoom: 4.5 });
+      map = new mappls.Map('map', { center: [22.9734, 78.6569], zoom: 4.5, traffic: false });
       map.on('load', function(){
         map.on('click', function(e){
           handleMapClick(e.lngLat.lat, e.lngLat.lng);
@@ -121,6 +137,89 @@
       setStatus('Map load fail hua: ' + err.message, true);
     }
   }
+
+  // ---- Place search (autosuggest) ----
+  var searchTimers = {};
+  function wireSuggest(inputId, boxId){
+    var input = document.getElementById(inputId);
+    var box = document.getElementById(boxId);
+    input.addEventListener('input', function(){
+      var q = input.value.trim();
+      clearTimeout(searchTimers[inputId]);
+      if(q.length < 3){ box.style.display = 'none'; return; }
+      searchTimers[inputId] = setTimeout(function(){
+        fetch('/api/search?q=' + encodeURIComponent(q))
+          .then(function(r){ return r.json(); })
+          .then(function(data){
+            var list = data.suggestedLocations || data.suggestions || [];
+            if(!list.length){ box.style.display = 'none'; return; }
+            box.innerHTML = '';
+            list.slice(0, 8).forEach(function(item){
+              var div = document.createElement('div');
+              div.className = 'suggest-item';
+              var title = item.placeName || item.placeAddress || item.eLoc || 'Unknown';
+              var sub = item.placeAddress && item.placeAddress !== title ? item.placeAddress : '';
+              div.innerHTML = title + (sub ? '<small>' + sub + '</small>' : '');
+              div.addEventListener('click', function(){
+                resolvePlace(item, function(lat, lng){
+                  input.value = lat.toFixed(6) + ',' + lng.toFixed(6);
+                  box.style.display = 'none';
+                  dropPin(lat, lng);
+                  try{ map.setCenter([lng, lat]); map.setZoom(12); }catch(e){}
+                });
+              });
+              box.appendChild(div);
+            });
+            box.style.display = 'block';
+          })
+          .catch(function(){ box.style.display = 'none'; });
+      }, 350);
+    });
+    document.addEventListener('click', function(e){
+      if(!box.contains(e.target) && e.target !== input) box.style.display = 'none';
+    });
+  }
+
+  function resolvePlace(item, cb){
+    if(item.latitude && item.longitude){
+      cb(parseFloat(item.latitude), parseFloat(item.longitude));
+    } else if(item.lat && item.lng){
+      cb(parseFloat(item.lat), parseFloat(item.lng));
+    } else {
+      setStatus('Is jagah ki exact location nahi mili, dusra suggestion try karo.', true);
+    }
+  }
+
+  wireSuggest('pt-source', 'suggest-source');
+  wireSuggest('pt-dest', 'suggest-dest');
+
+  // ---- Current location ----
+  document.getElementById('useMyLocBtn').addEventListener('click', function(){
+    if(!navigator.geolocation){
+      setStatus('Ye browser location share nahi kar sakta.', true);
+      return;
+    }
+    setStatus('Location le rahe hain...');
+    navigator.geolocation.getCurrentPosition(function(pos){
+      var lat = pos.coords.latitude, lng = pos.coords.longitude;
+      document.getElementById('pt-source').value = lat.toFixed(6) + ',' + lng.toFixed(6);
+      dropPin(lat, lng);
+      try{ map.setCenter([lng, lat]); map.setZoom(13); }catch(e){}
+      setStatus('Current location mil gayi.');
+    }, function(err){
+      setStatus('Location nahi mili: ' + err.message, true);
+    });
+  });
+
+  // ---- Traffic toggle ----
+  document.getElementById('showTraffic').addEventListener('change', function(e){
+    try{
+      if(e.target.checked){ map.addTraffic ? map.addTraffic() : (map.traffic = true); }
+      else { map.removeTraffic ? map.removeTraffic() : (map.traffic = false); }
+    }catch(err){
+      setStatus('Traffic layer is map style mein available nahi lag rahi.', true);
+    }
+  });
 
   function handleMapClick(lat, lng){
     var val = lat.toFixed(6) + ',' + lng.toFixed(6);
@@ -143,14 +242,19 @@
     }catch(e){ /* best-effort visual marker */ }
   }
 
+  var stopCounter = 0;
   function addStopRow(prefill){
     var container = document.getElementById('stops-container');
+    var id = 'stop-' + (stopCounter++);
     var row = document.createElement('div');
     row.className = 'stop-item';
-    row.innerHTML = '<input type="text" class="stop-input" placeholder="lat,lng">'
+    row.style.position = 'relative';
+    row.innerHTML = '<input type="text" class="stop-input" id="' + id + '" placeholder="Jagah ka naam ya lat,lng" autocomplete="off">'
+      + '<div class="suggest-box" id="suggest-' + id + '" style="top:34px"></div>'
       + '<button type="button" onclick="this.parentElement.remove()">✕</button>';
     if(prefill) row.querySelector('input').value = prefill;
     container.appendChild(row);
+    wireSuggest(id, 'suggest-' + id);
   }
   document.getElementById('addStopBtn').addEventListener('click', function(){ addStopRow(); });
   document.getElementById('clearBtn').addEventListener('click', function(){
